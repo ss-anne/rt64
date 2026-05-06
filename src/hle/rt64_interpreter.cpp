@@ -10,6 +10,12 @@
 
 //#define DUMP_DISPLAY_LISTS
 
+// PSR walk-time GDL CALL-target snapshot probe (paired with the submit-time
+// snapshot in extras.c / RT64Context::send_dl). See extras.c for details.
+extern "C" void pkmnstadium_gdl_walk_snapshot(
+    uint32_t target_vaddr, uint32_t parent_vaddr,
+    const uint8_t* head_ptr, uint64_t submit_seq);
+
 namespace RT64 {
     // ── Interpreter probe ring ──────────────────────────────────────
     // Always-on, tracks the last N (host) DL pointers visited in
@@ -235,6 +241,36 @@ namespace RT64 {
             const uint32_t pre_w1 = dl->w1;
 
             opCode = (dl->w0 >> 24);
+
+            // GDL walk-time probe: when the interpreter is about to walk a
+            // sub-DL via G_DL push=1 (CALL), snapshot the target's first 16
+            // bytes from RDRAM AS THE INTERPRETER SEES THEM. Pairs with the
+            // submit-time snapshot taken in RT64Context::send_dl. Comparing
+            // submit-bytes vs walk-bytes for matching target_vaddr identifies:
+            //   bytes equal + look like DL    -> normal CALL
+            //   bytes equal + don't look like DL -> Stadium emitted G_DL into
+            //                                       a non-DL buffer
+            //   bytes differ                  -> Stadium overwrote target
+            //                                    between submit and walk (race)
+            if (opCode == 0xDE && ((pre_w0 >> 16) & 0xFF) == 1) {
+                const uint32_t tgt_vaddr = pre_w1;
+                const uint32_t tgt_off = tgt_vaddr & 0x7FFFFF;
+                if (tgt_off + 16 <= 0x800000 && state->RDRAM != nullptr) {
+                    const uint64_t submit_seq =
+                        interp_probe::g_task_index.load(std::memory_order_relaxed);
+                    /* parent_vaddr: cmd's own kseg0 vaddr. dl host ptr - state->RDRAM
+                     * + 0x80000000. Cap to 0x80000000+0x7FFFFF to avoid garbage if
+                     * the dl host ptr is from a different mapping. */
+                    const uint64_t pc_off =
+                        reinterpret_cast<uint64_t>(dl) - reinterpret_cast<uint64_t>(state->RDRAM);
+                    const uint32_t parent_vaddr = (pc_off < 0x800000)
+                        ? (0x80000000u | static_cast<uint32_t>(pc_off))
+                        : 0;
+                    pkmnstadium_gdl_walk_snapshot(
+                        tgt_vaddr, parent_vaddr,
+                        state->RDRAM + tgt_off, submit_seq);
+                }
+            }
 
             if ((extendedOpCode != 0) && (opCode == extendedOpCode)) {
                 extendedFunction(state, &dl);
