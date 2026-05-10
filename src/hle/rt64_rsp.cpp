@@ -1,9 +1,24 @@
 //
 // RT64
 //
+// Modifications in this file are part of rt64 (MIT; see LICENSE).
+// Original file copyright remains with the upstream rt64 authors.
+//
+// Modified 2026 by Matthew Stanley:
+//   - PSR debug-hook: file-scope segment-table snapshot updated on
+//     RSP::setSegment, exposed via rt64_psr_segments_copy() so the
+//     PSR runner's debug_server can surface gSegments[0..15] via TCP.
+//     Used to triangulate stale-segment binding bugs in Stadium menu
+//     rendering. Gated behind RT64_PSR_DEBUG_HOOKS (default ON in
+//     PSR's CMake; can be defined to 0 to compile out the snapshot).
+//
+// Copyright (c) 2026 Matthew Stanley
+//
+// ---------------------------------------------------------------------
 
 #include "rt64_rsp.h"
 
+#include <atomic>
 #include <cassert>
 
 #include "../include/rt64_extended_gbi.h"
@@ -122,9 +137,26 @@ namespace RT64 {
         return maskPhysicalAddress<0x00FFFFFC>(fromSegmented(segAddress));
     }
 
+#if RT64_PSR_DEBUG_HOOKS
+    // File-scope snapshot updated by RSP::setSegment so an out-of-
+    // process probe (PSR's debug_server) can read segments without
+    // holding any RT64 lock or knowing which Interpreter/State is
+    // active. Updates are rare (a handful per frame, only when the
+    // game emits gsSPSegment via G_MOVEWORD) so the atomic store
+    // isn't on a hot path. Lives in namespace RT64 so the linker
+    // resolves it from the namespace-scoped reference inside
+    // RSP::setSegment below.
+    static std::atomic<uint32_t> g_psr_segments_snapshot[RSP_MAX_SEGMENTS]{};
+    static std::atomic<uint64_t> g_psr_segments_seq{0};
+#endif
+
     void RSP::setSegment(uint32_t seg, uint32_t address) {
         assert(seg < RSP_MAX_SEGMENTS);
         segments[seg] = address;
+#if RT64_PSR_DEBUG_HOOKS
+        g_psr_segments_snapshot[seg].store(address, std::memory_order_relaxed);
+        g_psr_segments_seq.fetch_add(1, std::memory_order_relaxed);
+#endif
     }
 
     void RSP::matrix(uint32_t address, uint8_t params) {
@@ -1193,3 +1225,17 @@ namespace RT64 {
         }
     }
 };
+
+#if RT64_PSR_DEBUG_HOOKS
+extern "C" void rt64_psr_segments_copy(uint32_t* out16, uint64_t* out_seq) {
+    if (out_seq) {
+        *out_seq = RT64::g_psr_segments_seq.load(std::memory_order_relaxed);
+    }
+    if (out16 == nullptr) {
+        return;
+    }
+    for (size_t i = 0; i < RSP_MAX_SEGMENTS; i++) {
+        out16[i] = RT64::g_psr_segments_snapshot[i].load(std::memory_order_relaxed);
+    }
+}
+#endif

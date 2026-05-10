@@ -295,6 +295,15 @@ add_compile_definitions(
     IMGUI_IMPL_VULKAN_NO_PROTOTYPES
 )
 
+# PSR debug-only hooks: file-scope snapshots of RSP-internal state so
+# the runner's debug_server can surface segment table / future probes
+# via TCP without holding any RT64 lock. Default ON for diagnostic
+# builds; flip to 0 for clean release builds with no overhead.
+if (NOT DEFINED RT64_PSR_DEBUG_HOOKS)
+    set(RT64_PSR_DEBUG_HOOKS 1)
+endif()
+add_compile_definitions(RT64_PSR_DEBUG_HOOKS=${RT64_PSR_DEBUG_HOOKS})
+
 if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
     add_compile_definitions("RT64_SDL_WINDOW_VULKAN")
 endif()
